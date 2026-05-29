@@ -271,16 +271,29 @@ class FullDSLiteTool(QMainWindow):
         self.btn_erase.setMinimumHeight(40)
         self.btn_erase.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
         self.btn_erase.clicked.connect(self.start_erase_all)
+        self.btn_unlock = QPushButton("🔑 仅解锁")
+        self.btn_unlock.setMinimumHeight(40)
+        self.btn_unlock.setStyleSheet("background-color: #ff9800; color: white; font-weight: bold;")
+        self.btn_unlock.clicked.connect(self.start_unlock_only)
         self.btn_erase_sectors = QPushButton("擦除扇区")
         self.btn_erase_sectors.setMinimumHeight(40)
         self.btn_erase_sectors.clicked.connect(self.start_erase_sectors)
+        self.btn_check = QPushButton("🔍 检测设备")
+        self.btn_check.setMinimumHeight(40)
+        self.btn_check.clicked.connect(self.check_device_status)
+        self.btn_read_id = QPushButton("📋 读取芯片ID")
+        self.btn_read_id.setMinimumHeight(40)
+        self.btn_read_id.clicked.connect(self.read_device_id)
         
         func_layout.addWidget(self.btn_read_mem, 0, 0)
         func_layout.addWidget(self.btn_load_ram, 0, 1)
         func_layout.addWidget(self.btn_flash_elf, 0, 2)
         func_layout.addWidget(self.btn_flash_bin, 1, 0)
         func_layout.addWidget(self.btn_erase, 1, 1)
-        func_layout.addWidget(self.btn_erase_sectors, 1, 2)
+        func_layout.addWidget(self.btn_unlock, 1, 2)
+        func_layout.addWidget(self.btn_erase_sectors, 2, 0)
+        func_layout.addWidget(self.btn_check, 2, 1)
+        func_layout.addWidget(self.btn_read_id, 2, 2)
         tab_main_layout.addWidget(func_group)
         
         # ---- 读取内存参数 ----
@@ -428,7 +441,8 @@ class FullDSLiteTool(QMainWindow):
     def set_busy(self, busy):
         widgets = [
             self.btn_read_mem, self.btn_load_ram, self.btn_flash_elf,
-            self.btn_flash_bin, self.btn_erase, self.btn_erase_sectors
+            self.btn_flash_bin, self.btn_erase, self.btn_unlock,
+            self.btn_erase_sectors, self.btn_check, self.btn_read_id
         ]
         for w in widgets:
             w.setEnabled(not busy)
@@ -644,6 +658,48 @@ class FullDSLiteTool(QMainWindow):
     def start_erase_sectors(self):
         args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", "-a", "Erase", "--verbose"]
         self.run_cmd("擦除扇区", args)
+
+    def start_unlock_only(self):
+        """仅解锁芯片，不擦除"""
+        keys = []
+        for i, edit in enumerate(self.csm_keys):
+            k = edit.text().strip().upper()
+            if not k: k = "FFFF"
+            try:
+                int(k, 16)
+                keys.append(k)
+            except:
+                QMessageBox.warning(self, "警告", f"CSM Key{i} 无效！")
+                return
+
+        self.log("\n" + "=" * 60)
+        self.log("【仅解锁芯片】")
+
+        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}"]
+        for i, k in enumerate(keys):
+            args.extend(["-s", f"FlashKey{i}={k}"])
+        if self.chk_auto_reset.isChecked():
+            args.extend(["-s", "AutoResetOnConnect=true", "-s", "HaltOnConnect=true"])
+        args.extend(["-a", "Unlock", "--verbose"])
+
+        self.log(f"命令: {' '.join(args)}")
+        self.log("⚠️ 点击确定后立即给目标板上电！")
+        self.run_cmd("仅解锁", args)
+
+    def check_device_status(self):
+        """检测设备连接状态"""
+        args = ["DSLite.exe", "-s", f"--config={self.CCXML_FILE}", "-a", "Connect", "--verbose"]
+        self.log("\n" + "=" * 60)
+        self.log("【检测设备连接】")
+        self.log("⚠️ 请确保目标板已上电并连接调试器")
+        self.run_cmd("检测设备", args)
+
+    def read_device_id(self):
+        """读取芯片ID"""
+        args = ["DSLite.exe", "-s", f"--config={self.CCXML_FILE}", "-a", "GetDeviceID", "--verbose"]
+        self.log("\n" + "=" * 60)
+        self.log("【读取芯片ID】")
+        self.run_cmd("读取芯片ID", args)
 
 
 # ====================== 启动 =======================
