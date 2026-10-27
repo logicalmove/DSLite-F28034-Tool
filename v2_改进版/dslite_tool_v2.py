@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 import subprocess
 import xml.etree.ElementTree as ET
@@ -14,12 +14,30 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
 
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ====================== 版本信息 =======================
 VERSION = "v2.0 — 2026-05-29"
 AUTHOR = "基于原始版全面改进"
 
 # ====================== 配置管理 =======================
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dslite_config.json")
+if getattr(sys, "frozen", False):
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "dslite_config.json")
+
+def resolve_ccxml_path(ccxml):
+    ccxml = (ccxml or "f28034.ccxml").strip()
+    if os.path.isabs(ccxml):
+        return ccxml
+    return os.path.join(SCRIPT_DIR, ccxml)
+
+def normalize_dslite_args(args, bin_dir):
+    normalized = list(args)
+    if normalized and normalized[0].lower() == "dslite.exe":
+        normalized[0] = os.path.join(bin_dir, "DSLite.exe")
+    return normalized
 
 def load_config():
     defaults = {
@@ -30,6 +48,8 @@ def load_config():
         "last_load_file": "",
         "last_elf_file": "",
         "last_bin_file": "",
+        "code_dir": "",
+        "csm_keys": ["FFFF"] * 8,
         "window_w": 1100,
         "window_h": 1000,
         "auto_detect_dslite": True,
@@ -51,17 +71,17 @@ def save_config(data):
 
 # ====================== DSLite 自动检测 =======================
 def find_dslite():
-    """自动查找 DSLite.exe"""
-    search_patterns = [
-        r"C:\ti\ccs*\ccs_base\DebugServer\bin\DSLite.exe",
-        r"C:\ti\*\DebugServer\bin\DSLite.exe",
-        r"C:\Program Files\TI\ccs*\ccs_base\DebugServer\bin\DSLite.exe",
-        r"C:\Program Files (x86)\TI\ccs*\ccs_base\DebugServer\bin\DSLite.exe",
-    ]
-    for pattern in search_patterns:
-        matches = glob.glob(pattern)
-        if matches:
-            return os.path.dirname(matches[0])
+    p = os.path.join(SCRIPT_DIR, "test", "ccs_base", "DebugServer", "bin", "DSLite.exe")
+    if os.path.exists(p):
+        return os.path.abspath(os.path.dirname(p))
+    p = os.path.join(SCRIPT_DIR, "..", "test", "ccs_base", "DebugServer", "bin", "DSLite.exe")
+    if os.path.exists(p):
+        return os.path.abspath(os.path.dirname(p))
+    for r in ["C:\\ti", "C:\\Program Files\\TI", "C:\\Program Files (x86)\\TI"]:
+        if os.path.exists(r):
+            for d, _, fs in os.walk(r):
+                if "DSLite.exe" in fs:
+                    return d
     return ""
 
 def find_cl2000():
@@ -102,7 +122,8 @@ class CmdThread(QThread):
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
-                timeout=120
+                timeout=120,
+                creationflags=CREATE_NO_WINDOW
             )
             
             full_log = res.stdout + "\n" + res.stderr
@@ -284,6 +305,10 @@ class FullDSLiteTool(QMainWindow):
         self.btn_read_id = QPushButton("📋 读取芯片ID")
         self.btn_read_id.setMinimumHeight(40)
         self.btn_read_id.clicked.connect(self.read_device_id)
+        self.btn_lock = QPushButton("🔒 写入密码+上锁")
+        self.btn_lock.setMinimumHeight(40)
+        self.btn_lock.setStyleSheet("background-color: #6d1b7b; color: white; font-weight: bold;")
+        self.btn_lock.clicked.connect(self.start_lock_chip)
         
         func_layout.addWidget(self.btn_read_mem, 0, 0)
         func_layout.addWidget(self.btn_load_ram, 0, 1)
@@ -294,6 +319,7 @@ class FullDSLiteTool(QMainWindow):
         func_layout.addWidget(self.btn_erase_sectors, 2, 0)
         func_layout.addWidget(self.btn_check, 2, 1)
         func_layout.addWidget(self.btn_read_id, 2, 2)
+        func_layout.addWidget(self.btn_lock, 3, 0, 1, 3)
         tab_main_layout.addWidget(func_group)
         
         # ---- 读取内存参数 ----
@@ -330,42 +356,53 @@ class FullDSLiteTool(QMainWindow):
         flash_layout.addWidget(QLabel("bin烧录地址："), 1, 0)
         self.bin_addr_edit = QLineEdit(self.config.get("last_bin_flash_addr", "0x3E8000"))
         flash_layout.addWidget(self.bin_addr_edit, 1, 1)
+
+        self.code_dir_edit = QLineEdit(self.config.get("code_dir", ""))
+        self.code_dir_edit.setPlaceholderText("固定代码目录（选择 out/elf/bin 时默认打开）")
+        self.btn_sel_code_dir = QPushButton("📁 代码目录")
+        self.btn_sel_code_dir.clicked.connect(self.select_code_dir)
+        flash_layout.addWidget(QLabel("代码目录："), 2, 0)
+        flash_layout.addWidget(self.code_dir_edit, 2, 1, 1, 4)
+        flash_layout.addWidget(self.btn_sel_code_dir, 2, 5)
         
-        self.load_path_edit = QLineEdit()
+        self.load_path_edit = QLineEdit(self.config.get("last_load_file", ""))
         self.load_path_edit.setPlaceholderText("RAM加载 .out/.elf 文件路径")
         self.btn_sel_load = QPushButton("📂 选文件")
-        self.btn_sel_load.clicked.connect(lambda: self.select_file(self.load_path_edit, "程序文件(*.out *.elf)"))
-        flash_layout.addWidget(QLabel("RAM加载："), 2, 0)
-        flash_layout.addWidget(self.load_path_edit, 2, 1, 1, 4)
-        flash_layout.addWidget(self.btn_sel_load, 2, 5)
+        self.btn_sel_load.clicked.connect(lambda: self.select_file(self.load_path_edit, "程序文件(*.out *.elf)", "last_load_file"))
+        flash_layout.addWidget(QLabel("RAM加载："), 3, 0)
+        flash_layout.addWidget(self.load_path_edit, 3, 1, 1, 4)
+        flash_layout.addWidget(self.btn_sel_load, 3, 5)
         
-        self.elf_path_edit = QLineEdit()
+        self.elf_path_edit = QLineEdit(self.config.get("last_elf_file", ""))
         self.elf_path_edit.setPlaceholderText("Flash烧录 .out/.elf 文件路径")
         self.btn_sel_elf = QPushButton("📂 选文件")
-        self.btn_sel_elf.clicked.connect(lambda: self.select_file(self.elf_path_edit, "程序文件(*.out *.elf)"))
-        flash_layout.addWidget(QLabel("ELF烧录："), 3, 0)
-        flash_layout.addWidget(self.elf_path_edit, 3, 1, 1, 4)
-        flash_layout.addWidget(self.btn_sel_elf, 3, 5)
+        self.btn_sel_elf.clicked.connect(lambda: self.select_file(self.elf_path_edit, "程序文件(*.out *.elf)", "last_elf_file"))
+        flash_layout.addWidget(QLabel("ELF烧录："), 4, 0)
+        flash_layout.addWidget(self.elf_path_edit, 4, 1, 1, 4)
+        flash_layout.addWidget(self.btn_sel_elf, 4, 5)
         
-        self.bin_path_edit = QLineEdit()
+        self.bin_path_edit = QLineEdit(self.config.get("last_bin_file", ""))
         self.bin_path_edit.setPlaceholderText("Flash烧录 .bin 文件路径")
         self.btn_sel_bin = QPushButton("📂 选文件")
-        self.btn_sel_bin.clicked.connect(lambda: self.select_file(self.bin_path_edit, "二进制文件(*.bin)"))
-        flash_layout.addWidget(QLabel("BIN烧录："), 4, 0)
-        flash_layout.addWidget(self.bin_path_edit, 4, 1, 1, 4)
-        flash_layout.addWidget(self.btn_sel_bin, 4, 5)
+        self.btn_sel_bin.clicked.connect(lambda: self.select_file(self.bin_path_edit, "二进制文件(*.bin)", "last_bin_file"))
+        flash_layout.addWidget(QLabel("BIN烧录："), 5, 0)
+        flash_layout.addWidget(self.bin_path_edit, 5, 1, 1, 4)
+        flash_layout.addWidget(self.btn_sel_bin, 5, 5)
         
         tab_main_layout.addWidget(flash_group)
         
         # ---- CSM 密码输入（简化版）----
-        csm_group = QGroupBox("CSM 密码设置（擦除解锁用）")
+        csm_group = QGroupBox("CSM 密码设置（解锁/上锁用，保存到本机配置）")
         csm_layout = QHBoxLayout(csm_group)
         csm_layout.addWidget(QLabel("128位密码（默认全FFFF）："))
         
         self.csm_keys = []
+        saved_keys = self.config.get("csm_keys", ["FFFF"] * 8)
+        if not isinstance(saved_keys, list) or len(saved_keys) != 8:
+            saved_keys = ["FFFF"] * 8
         for i in range(4):
             vlayout = QVBoxLayout()
-            edit = QLineEdit("FFFF")
+            edit = QLineEdit(str(saved_keys[i * 2]).upper())
             edit.setFixedWidth(70)
             edit.setMaxLength(4)
             vlayout.addWidget(QLabel(f"K{i*2}-{i*2+1}"))
@@ -373,7 +410,7 @@ class FullDSLiteTool(QMainWindow):
             csm_layout.addLayout(vlayout)
             self.csm_keys.append(edit)
             vlayout2 = QVBoxLayout()
-            edit2 = QLineEdit("FFFF")
+            edit2 = QLineEdit(str(saved_keys[i * 2 + 1]).upper())
             edit2.setFixedWidth(70)
             edit2.setMaxLength(4)
             vlayout2.addWidget(QLabel(f"K{i*2+2}-{i*2+3}"))
@@ -385,6 +422,9 @@ class FullDSLiteTool(QMainWindow):
         self.chk_auto_reset = QCheckBox("连接后自动复位")
         self.chk_auto_reset.setChecked(True)
         csm_layout.addWidget(self.chk_auto_reset)
+        self.btn_save_keys = QPushButton("💾 保存密码")
+        self.btn_save_keys.clicked.connect(self.save_current_config)
+        csm_layout.addWidget(self.btn_save_keys)
         tab_main_layout.addWidget(csm_group)
         
         # ---- 内存预览 ----
@@ -442,7 +482,9 @@ class FullDSLiteTool(QMainWindow):
         widgets = [
             self.btn_read_mem, self.btn_load_ram, self.btn_flash_elf,
             self.btn_flash_bin, self.btn_erase, self.btn_unlock,
-            self.btn_erase_sectors, self.btn_check, self.btn_read_id
+            self.btn_erase_sectors, self.btn_check, self.btn_read_id,
+            self.btn_lock, self.btn_sel_code_dir, self.btn_sel_load,
+            self.btn_sel_elf, self.btn_sel_bin, self.btn_save_keys
         ]
         for w in widgets:
             w.setEnabled(not busy)
@@ -456,10 +498,27 @@ class FullDSLiteTool(QMainWindow):
         self.progress_bar.setValue(value)
         self.progress_bar.setFormat(f"{text} ({value}%)")
 
-    def select_file(self, edit, filter_str):
-        path, _ = QFileDialog.getOpenFileName(self, "选择文件", "", filter_str)
+    def select_file(self, edit, filter_str, config_key=None):
+        start_dir = self.code_dir_edit.text().strip() if hasattr(self, "code_dir_edit") else ""
+        if not start_dir or not os.path.isdir(start_dir):
+            start_dir = os.path.dirname(edit.text().strip()) if edit.text().strip() else ""
+        path, _ = QFileDialog.getOpenFileName(self, "选择文件", start_dir, filter_str)
         if path:
             edit.setText(path)
+            if config_key:
+                self.config[config_key] = path
+                save_config(self.config)
+
+    def select_code_dir(self):
+        start_dir = self.code_dir_edit.text().strip()
+        if not start_dir or not os.path.isdir(start_dir):
+            start_dir = SCRIPT_DIR
+        path = QFileDialog.getExistingDirectory(self, "选择固定代码目录", start_dir)
+        if path:
+            self.code_dir_edit.setText(path)
+            self.config["code_dir"] = path
+            save_config(self.config)
+            self.log(f"✅ 固定代码目录已更新: {path}")
 
     def select_bin_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择 DSLite.exe 所在目录", self.BIN_DIR)
@@ -494,8 +553,29 @@ class FullDSLiteTool(QMainWindow):
         self.config["chip"] = self.chip_combo.currentText()
         self.config["ccxml"] = self.ccxml_edit.text()
         self.config["last_bin_flash_addr"] = self.bin_addr_edit.text()
+        self.config["code_dir"] = self.code_dir_edit.text().strip()
+        self.config["last_load_file"] = self.load_path_edit.text().strip()
+        self.config["last_elf_file"] = self.elf_path_edit.text().strip()
+        self.config["last_bin_file"] = self.bin_path_edit.text().strip()
+        keys = self.get_csm_keys()
+        if keys is None:
+            return
+        self.config["csm_keys"] = keys
+        self.CCXML_FILE = self.config["ccxml"]
         save_config(self.config)
         self.log("✅ 配置已保存")
+
+    def get_csm_keys(self):
+        keys = []
+        for i, edit in enumerate(self.csm_keys):
+            k = edit.text().strip().upper()
+            if not k:
+                k = "FFFF"
+            if not re.fullmatch(r"[0-9A-Fa-f]{1,4}", k):
+                QMessageBox.warning(self, "警告", f"CSM Key{i} 无效，请输入 1-4 位十六进制数。")
+                return None
+            keys.append(k.zfill(4).upper())
+        return keys
 
     def save_log(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -511,9 +591,13 @@ class FullDSLiteTool(QMainWindow):
                 QMessageBox.warning(self, "错误", f"保存失败: {str(e)}")
 
     def run_cmd(self, task_name, args, output_file=""):
+        if self.active_threads:
+            QMessageBox.warning(self, "忙碌", "当前已有 DSLite 任务正在执行，请等待完成后再操作。")
+            return
         if not os.path.exists(os.path.join(self.BIN_DIR, "DSLite.exe")):
             QMessageBox.warning(self, "错误", f"DSLite.exe 未找到！\n当前目录: {self.BIN_DIR}")
             return
+        args = normalize_dslite_args(args, self.BIN_DIR)
         
         self.set_busy(True)
         self.log(f"\n▶️ {task_name}")
@@ -552,6 +636,7 @@ class FullDSLiteTool(QMainWindow):
         addr = self.addr_edit.text().strip()
         length = self.len_edit.text().strip()
         out_file = self.outfile_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
 
         if not addr or not length:
             QMessageBox.warning(self, "警告", "请填写地址和长度！")
@@ -559,7 +644,7 @@ class FullDSLiteTool(QMainWindow):
         
         out_full = os.path.join(self.BIN_DIR, out_file)
         args = ["DSLite.exe", "memory",
-                f"--config={self.CCXML_FILE}",
+                f"--config={ccxml}",
                 f"--range={addr},{length}",
                 f"--output={out_file}", "--verbose"]
         
@@ -595,24 +680,27 @@ class FullDSLiteTool(QMainWindow):
     # ====================== RAM加载 ======================
     def start_load_program(self):
         file_path = self.load_path_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         if not os.path.exists(file_path):
             QMessageBox.warning(self, "警告", "请选择有效文件！")
             return
-        args = ["DSLite.exe", "load", f"--config={self.CCXML_FILE}", file_path, "--verbose"]
+        args = ["DSLite.exe", "load", f"--config={ccxml}", file_path, "--verbose"]
         self.run_cmd(f"加载RAM: {os.path.basename(file_path)}", args)
 
     # ====================== Flash 烧录 ======================
     def start_elf_flash(self):
         file_path = self.elf_path_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         if not os.path.exists(file_path):
             QMessageBox.warning(self, "警告", "请选择有效文件！")
             return
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", file_path, "--verbose"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", file_path, "--verbose"]
         self.run_cmd(f"烧录ELF: {os.path.basename(file_path)}", args)
 
     def start_bin_flash(self):
         file_path = self.bin_path_edit.text().strip()
         flash_addr = self.bin_addr_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         if not os.path.exists(file_path):
             QMessageBox.warning(self, "警告", "请选择有效文件！")
             return
@@ -620,7 +708,7 @@ class FullDSLiteTool(QMainWindow):
             QMessageBox.warning(self, "警告", "请填写地址！")
             return
         bin_target = f"{file_path},{flash_addr}"
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", bin_target, "--verbose"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", bin_target, "--verbose"]
         self.run_cmd(f"烧录BIN: {os.path.basename(file_path)} -> {flash_addr}", args)
 
     def on_bin_addr_preset_change(self):
@@ -630,23 +718,16 @@ class FullDSLiteTool(QMainWindow):
 
     # ====================== 擦除解锁 ======================
     def start_erase_all(self):
-        keys = []
-        for i, edit in enumerate(self.csm_keys):
-            k = edit.text().strip().upper()
-            if not k:
-                k = "FFFF"
-            try:
-                int(k, 16)
-                keys.append(k)
-            except:
-                QMessageBox.warning(self, "警告", f"CSM Key{i} 无效！")
-                return
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        keys = self.get_csm_keys()
+        if keys is None:
+            return
 
         self.log("\n" + "=" * 60)
         self.log("【全擦除 + 解锁】")
         self.log("⚠️ 点击确定后请立即给目标板上电！")
 
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}"]
         for i, k in enumerate(keys):
             args.extend(["-s", f"FlashKey{i}={k}"])
         if self.chk_auto_reset.isChecked():
@@ -656,26 +737,21 @@ class FullDSLiteTool(QMainWindow):
         self.run_cmd("全擦除+解锁", args)
 
     def start_erase_sectors(self):
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", "-a", "Erase", "--verbose"]
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", "-a", "Erase", "--verbose"]
         self.run_cmd("擦除扇区", args)
 
     def start_unlock_only(self):
         """仅解锁芯片，不擦除"""
-        keys = []
-        for i, edit in enumerate(self.csm_keys):
-            k = edit.text().strip().upper()
-            if not k: k = "FFFF"
-            try:
-                int(k, 16)
-                keys.append(k)
-            except:
-                QMessageBox.warning(self, "警告", f"CSM Key{i} 无效！")
-                return
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        keys = self.get_csm_keys()
+        if keys is None:
+            return
 
         self.log("\n" + "=" * 60)
         self.log("【仅解锁芯片】")
 
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}"]
         for i, k in enumerate(keys):
             args.extend(["-s", f"FlashKey{i}={k}"])
         if self.chk_auto_reset.isChecked():
@@ -686,9 +762,36 @@ class FullDSLiteTool(QMainWindow):
         self.log("⚠️ 点击确定后立即给目标板上电！")
         self.run_cmd("仅解锁", args)
 
+    def start_lock_chip(self):
+        """写入 CSM 密码并上锁。此操作会改变芯片安全状态。"""
+        keys = self.get_csm_keys()
+        if keys is None:
+            return
+        if all(k == "FFFF" for k in keys):
+            QMessageBox.warning(self, "警告", "当前密码全为 FFFF，不建议写入默认密码上锁。")
+            return
+
+        text = "此操作将写入 CSM 密码并执行 Lock，可能导致后续必须使用该密码解锁。\n\n确认继续？"
+        ret = QMessageBox.question(self, "确认上锁", text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        args = ["DSLite.exe", "flash", f"--config={ccxml}"]
+        for i, k in enumerate(keys):
+            args.extend(["-s", f"FlashKey{i}={k}"])
+        args.extend(["-a", "ProgramPassword", "-a", "Lock", "--verbose"])
+
+        self.config["csm_keys"] = keys
+        save_config(self.config)
+        self.log("\n" + "=" * 60)
+        self.log("【写入 CSM 密码 + 上锁】")
+        self.run_cmd("写入密码+上锁", args)
+
     def check_device_status(self):
         """检测设备连接状态"""
-        args = ["DSLite.exe", "-s", f"--config={self.CCXML_FILE}", "-a", "Connect", "--verbose"]
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", "--list-ops", "--verbose"]
         self.log("\n" + "=" * 60)
         self.log("【检测设备连接】")
         self.log("⚠️ 请确保目标板已上电并连接调试器")
@@ -696,10 +799,13 @@ class FullDSLiteTool(QMainWindow):
 
     def read_device_id(self):
         """读取芯片ID"""
-        args = ["DSLite.exe", "-s", f"--config={self.CCXML_FILE}", "-a", "GetDeviceID", "--verbose"]
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        out_file = "device_id.bin"
+        out_full = os.path.join(self.BIN_DIR, out_file)
+        args = ["DSLite.exe", "memory", f"--config={ccxml}", "--range=0x0880,0x08", f"--output={out_file}", "--verbose"]
         self.log("\n" + "=" * 60)
-        self.log("【读取芯片ID】")
-        self.run_cmd("读取芯片ID", args)
+        self.log("【读取芯片ID/DEVEMU寄存器】")
+        self.run_cmd("读取芯片ID", args, out_full)
 
 
 # ====================== 启动 =======================

@@ -20,6 +20,19 @@ AUTHOR = "基于原始版全面改进"
 
 # ====================== 配置管理 =======================
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dslite_config.json")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def resolve_ccxml_path(ccxml):
+    ccxml = (ccxml or "f28034.ccxml").strip()
+    if os.path.isabs(ccxml):
+        return ccxml
+    return os.path.join(SCRIPT_DIR, ccxml)
+
+def normalize_dslite_args(args, bin_dir):
+    normalized = list(args)
+    if normalized and normalized[0].lower() == "dslite.exe":
+        normalized[0] = os.path.join(bin_dir, "DSLite.exe")
+    return normalized
 
 def load_config():
     defaults = {
@@ -52,6 +65,9 @@ def save_config(data):
 # ====================== DSLite 自动检测 =======================
 def find_dslite():
     """自动查找 DSLite.exe"""
+    bundled = os.path.join(SCRIPT_DIR, "test", "ccs_base", "DebugServer", "bin", "DSLite.exe")
+    if os.path.exists(bundled):
+        return os.path.dirname(bundled)
     search_patterns = [
         r"C:\ti\ccs*\ccs_base\DebugServer\bin\DSLite.exe",
         r"C:\ti\*\DebugServer\bin\DSLite.exe",
@@ -480,6 +496,7 @@ class FullDSLiteTool(QMainWindow):
         self.config["chip"] = self.chip_combo.currentText()
         self.config["ccxml"] = self.ccxml_edit.text()
         self.config["last_bin_flash_addr"] = self.bin_addr_edit.text()
+        self.CCXML_FILE = self.config["ccxml"]
         save_config(self.config)
         self.log("✅ 配置已保存")
 
@@ -500,6 +517,7 @@ class FullDSLiteTool(QMainWindow):
         if not os.path.exists(os.path.join(self.BIN_DIR, "DSLite.exe")):
             QMessageBox.warning(self, "错误", f"DSLite.exe 未找到！\n当前目录: {self.BIN_DIR}")
             return
+        args = normalize_dslite_args(args, self.BIN_DIR)
         
         self.set_busy(True)
         self.log(f"\n▶️ {task_name}")
@@ -538,6 +556,7 @@ class FullDSLiteTool(QMainWindow):
         addr = self.addr_edit.text().strip()
         length = self.len_edit.text().strip()
         out_file = self.outfile_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
 
         if not addr or not length:
             QMessageBox.warning(self, "警告", "请填写地址和长度！")
@@ -545,7 +564,7 @@ class FullDSLiteTool(QMainWindow):
         
         out_full = os.path.join(self.BIN_DIR, out_file)
         args = ["DSLite.exe", "memory",
-                f"--config={self.CCXML_FILE}",
+                f"--config={ccxml}",
                 f"--range={addr},{length}",
                 f"--output={out_file}", "--verbose"]
         
@@ -581,24 +600,27 @@ class FullDSLiteTool(QMainWindow):
     # ====================== RAM加载 ======================
     def start_load_program(self):
         file_path = self.load_path_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         if not os.path.exists(file_path):
             QMessageBox.warning(self, "警告", "请选择有效文件！")
             return
-        args = ["DSLite.exe", "load", f"--config={self.CCXML_FILE}", file_path, "--verbose"]
+        args = ["DSLite.exe", "load", f"--config={ccxml}", file_path, "--verbose"]
         self.run_cmd(f"加载RAM: {os.path.basename(file_path)}", args)
 
     # ====================== Flash 烧录 ======================
     def start_elf_flash(self):
         file_path = self.elf_path_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         if not os.path.exists(file_path):
             QMessageBox.warning(self, "警告", "请选择有效文件！")
             return
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", file_path, "--verbose"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", file_path, "--verbose"]
         self.run_cmd(f"烧录ELF: {os.path.basename(file_path)}", args)
 
     def start_bin_flash(self):
         file_path = self.bin_path_edit.text().strip()
         flash_addr = self.bin_addr_edit.text().strip()
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         if not os.path.exists(file_path):
             QMessageBox.warning(self, "警告", "请选择有效文件！")
             return
@@ -606,7 +628,7 @@ class FullDSLiteTool(QMainWindow):
             QMessageBox.warning(self, "警告", "请填写地址！")
             return
         bin_target = f"{file_path},{flash_addr}"
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", bin_target, "--verbose"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", bin_target, "--verbose"]
         self.run_cmd(f"烧录BIN: {os.path.basename(file_path)} -> {flash_addr}", args)
 
     def on_bin_addr_preset_change(self):
@@ -617,6 +639,7 @@ class FullDSLiteTool(QMainWindow):
     # ====================== 擦除解锁 ======================
     def start_erase_all(self):
         keys = []
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
         for i, edit in enumerate(self.csm_keys):
             k = edit.text().strip().upper()
             if not k:
@@ -632,7 +655,7 @@ class FullDSLiteTool(QMainWindow):
         self.log("【全擦除 + 解锁】")
         self.log("⚠️ 点击确定后请立即给目标板上电！")
 
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}"]
+        args = ["DSLite.exe", "flash", f"--config={ccxml}"]
         for i, k in enumerate(keys):
             args.extend(["-s", f"FlashKey{i}={k}"])
         if self.chk_auto_reset.isChecked():
@@ -642,7 +665,8 @@ class FullDSLiteTool(QMainWindow):
         self.run_cmd("全擦除+解锁", args)
 
     def start_erase_sectors(self):
-        args = ["DSLite.exe", "flash", f"--config={self.CCXML_FILE}", "-a", "Erase", "--verbose"]
+        ccxml = resolve_ccxml_path(self.ccxml_edit.text())
+        args = ["DSLite.exe", "flash", f"--config={ccxml}", "-a", "Erase", "--verbose"]
         self.run_cmd("擦除扇区", args)
 
 

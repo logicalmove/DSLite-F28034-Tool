@@ -21,7 +21,7 @@ def read_bin_file(file_name):
             print(f"{offset}      {hex_str}")
 
     except FileNotFoundError:
-        print(f"❌ 错误：没找到文件 {file}，请确认文件名正确！")
+        print(f"❌ 错误：没找到文件 {file_name}，请确认文件名正确！")
 
 # ===================== 你只需要改这里 =====================
 # 把这里改成你的BIN文件名（比如 flash.bin / adc_reg.bin）
